@@ -1,4 +1,4 @@
-/*******************************************************************************************[Alg.h]
+/*****************************************************************************************[Queue.h]
 Copyright (c) 2003-2006, Niklas Een, Niklas Sorensson
 Copyright (c) 2007-2010, Niklas Sorensson
 
@@ -18,65 +18,50 @@ DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE,
 OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 **************************************************************************************************/
 
-#ifndef Minisat_Alg_h
-#define Minisat_Alg_h
+#ifndef Minisat_Queue_h
+#define Minisat_Queue_h
 
 #include "minisat/mtl/Vec.h"
 
 namespace Minisat {
 
 //=================================================================================================
-// Useful functions on vector-like types:
 
-//=================================================================================================
-// Removing and searching for elements:
-//
-
-template<class V, class T>
-static inline void remove(V& ts, const T& t)
-{
-    int j = 0;
-    for (; j < (int)ts.size() && ts[j] != t; j++);
-    assert(j < (int)ts.size());
-    for (; j < (int)ts.size()-1; j++) ts[j] = ts[j+1];
-    ts.pop();
-}
-
-
-template<class V, class T>
-static inline bool find(V& ts, const T& t)
-{
-    int j = 0;
-    for (; j < (int)ts.size() && ts[j] != t; j++);
-    return j < (int)ts.size();
-}
-
-
-//=================================================================================================
-// Copying vectors with support for nested vector types:
-//
-
-// Base case:
 template<class T>
-static inline void copy(const T& from, T& to)
-{
-    to = from;
-}
+class Queue {
+    vec<T>  buf;
+    int     first;
+    int     end;
 
-// Recursive case:
-template<class T>
-static inline void copy(const vec<T>& from, vec<T>& to, bool append = false)
-{
-    if (!append)
-        to.clear();
-    for (int i = 0; i < from.size(); i++){
-        to.push();
-        copy(from[i], to.last());
+public:
+    typedef T Key;
+
+    Queue() : buf(1), first(0), end(0) {}
+
+    void clear (bool dealloc = false) { buf.clear(dealloc); buf.growTo(1); first = end = 0; }
+    int  size  () const { return (end >= first) ? end - first : end - first + buf.size(); }
+
+    const T& operator [] (int index) const  { assert(index >= 0); assert(index < size()); return buf[(first + index) % buf.size()]; }
+    T&       operator [] (int index)        { assert(index >= 0); assert(index < size()); return buf[(first + index) % buf.size()]; }
+
+    T    peek  () const { assert(first != end); return buf[first]; }
+    void pop   () { assert(first != end); first++; if (first == buf.size()) first = 0; }
+    void insert(T elem) {   // INVARIANT: buf[end] is always unused
+        buf[end++] = elem;
+        if (end == buf.size()) end = 0;
+        if (first == end){  // Resize:
+            vec<T>  tmp((buf.size()*3 + 1) >> 1);
+            //**/printf("queue alloc: %d elems (%.1f MB)\n", tmp.size(), tmp.size() * sizeof(T) / 1000000.0);
+            int     i = 0;
+            for (int j = first; j < buf.size(); j++) tmp[i++] = buf[j];
+            for (int j = 0    ; j < end       ; j++) tmp[i++] = buf[j];
+            first = 0;
+            end   = buf.size();
+            tmp.moveTo(buf);
+        }
     }
-}
+};
 
-template<class T>
-static inline void append(const vec<T>& from, vec<T>& to){ copy(from, to, true); }
 
 //=================================================================================================
 }

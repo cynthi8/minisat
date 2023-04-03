@@ -51,6 +51,7 @@ SimpSolver::SimpSolver() :
   , use_asymm          (opt_use_asymm)
   , use_rcheck         (opt_use_rcheck)
   , use_elim           (opt_use_elim)
+  , extend_model       (true)
   , merges             (0)
   , asymm_lits         (0)
   , eliminated_vars    (0)
@@ -89,6 +90,18 @@ Var SimpSolver::newVar(lbool upol, bool dvar) {
     return v; }
 
 
+void SimpSolver::releaseVar(Lit l)
+{
+    assert(!isEliminated(var(l)));
+    if (!use_simplification && var(l) >= max_simp_var)
+        // Note: Guarantees that no references to this variable is
+        // left in model extension datastructure. Could be improved!
+        Solver::releaseVar(l);
+    else
+        // Otherwise, don't allow variable to be reused.
+        Solver::addClause(l);
+}
+
 
 lbool SimpSolver::solve_(bool do_simp, bool turn_off_simp)
 {
@@ -119,7 +132,7 @@ lbool SimpSolver::solve_(bool do_simp, bool turn_off_simp)
     else if (verbosity >= 1)
         printf("===============================================================================\n");
 
-    if (result == l_True)
+    if (result == l_True && extend_model)
         extendModel();
 
     if (do_simp)
@@ -226,11 +239,12 @@ bool SimpSolver::merge(const Clause& _ps, const Clause& _qs, Var v, vec<Lit>& ou
     for (int i = 0; i < qs.size(); i++){
         if (var(qs[i]) != v){
             for (int j = 0; j < ps.size(); j++)
-                if (var(ps[j]) == var(qs[i]))
+                if (var(ps[j]) == var(qs[i])){
                     if (ps[j] == ~qs[i])
                         return false;
                     else
                         goto next;
+                }
             out_clause.push(qs[i]);
         }
         next:;
@@ -260,11 +274,12 @@ bool SimpSolver::merge(const Clause& _ps, const Clause& _qs, Var v, int& size)
     for (int i = 0; i < qs.size(); i++){
         if (var(__qs[i]) != v){
             for (int j = 0; j < ps.size(); j++)
-                if (var(__ps[j]) == var(__qs[i]))
+                if (var(__ps[j]) == var(__qs[i])){
                     if (__ps[j] == ~__qs[i])
                         return false;
                     else
                         goto next;
+                }
             size++;
         }
         next:;
@@ -310,7 +325,7 @@ bool SimpSolver::implied(const vec<Lit>& c)
     for (int i = 0; i < c.size(); i++)
         if (value(c[i]) == l_True){
             cancelUntil(0);
-            return false;
+            return true;
         }else if (value(c[i]) != l_False){
             assert(value(c[i]) == l_Undef);
             uncheckedEnqueue(~c[i]);
@@ -644,6 +659,7 @@ bool SimpSolver::eliminate(bool turn_off_elim)
         use_simplification    = false;
         remove_satisfied      = true;
         ca.extra_clause_field = false;
+        max_simp_var          = nVars();
 
         // Force full cleanup (this is safe and desirable since it only happens once):
         rebuildOrderHeap();
@@ -680,8 +696,13 @@ void SimpSolver::relocAll(ClauseAllocator& to)
 
     // Subsumption queue:
     //
-    assert(subsumption_queue.size() == 0);
-
+    for (int i = subsumption_queue.size(); i > 0; i--){
+        CRef cr = subsumption_queue.peek(); subsumption_queue.pop();
+        if (ca[cr].mark()) continue;
+        ca.reloc(cr, to);
+        subsumption_queue.insert(cr);
+    }
+        
     // Temporary clause:
     //
     ca.reloc(bwdsub_tmpunit, to);

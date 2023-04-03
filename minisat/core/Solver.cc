@@ -20,6 +20,7 @@ OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWA
 
 #include <math.h>
 
+#include "minisat/mtl/Alg.h"
 #include "minisat/mtl/Sort.h"
 #include "minisat/utils/System.h"
 #include "minisat/core/Solver.h"
@@ -43,6 +44,7 @@ static BoolOption    opt_luby_restart      (_cat, "luby",        "Use the Luby r
 static IntOption     opt_restart_first     (_cat, "rfirst",      "The base restart interval", 100, IntRange(1, INT32_MAX));
 static DoubleOption  opt_restart_inc       (_cat, "rinc",        "Restart interval increase factor", 2, DoubleRange(1, false, HUGE_VAL, false));
 static DoubleOption  opt_garbage_frac      (_cat, "gc-frac",     "The fraction of wasted memory allowed before a garbage collection is triggered",  0.20, DoubleRange(0, false, HUGE_VAL, false));
+static IntOption     opt_min_learnts_lim   (_cat, "min-learnts", "Minimum learnt clause limit",  0, IntRange(0, INT32_MAX));
 
 
 //=================================================================================================
@@ -64,6 +66,7 @@ Solver::Solver() :
   , rnd_pol          (false)
   , rnd_init_act     (opt_rnd_init_act)
   , garbage_frac     (opt_garbage_frac)
+  , min_learnts_lim  (opt_min_learnts_lim)
   , restart_first    (opt_restart_first)
   , restart_inc      (opt_restart_inc)
 
@@ -115,7 +118,13 @@ Solver::~Solver()
 //
 Var Solver::newVar(lbool upol, bool dvar)
 {
-    Var v = next_var++;
+    Var v;
+    if (free_vars.size() > 0){
+        v = free_vars.last();
+        free_vars.pop();
+    }else
+        v = next_var++;
+
     watches  .init(mkLit(v, false));
     watches  .init(mkLit(v, true ));
     assigns  .insert(v, l_Undef);
@@ -130,6 +139,17 @@ Var Solver::newVar(lbool upol, bool dvar)
     trail    .capacity(v+1);
     setDecisionVar(v, dvar);
     return v;
+}
+
+
+// Note: at the moment, only unassigned variable will be released (this is to avoid duplicate
+// releases of the same variable).
+void Solver::releaseVar(Lit l)
+{
+    if (value(l) == l_Undef){
+        addClause(l);
+        released_vars.push(var(l));
+    }
 }
 
 
@@ -215,7 +235,7 @@ void Solver::cancelUntil(int level) {
         for (int c = trail.size()-1; c >= trail_lim[level]; c--){
             Var      x  = var(trail[c]);
             assigns [x] = l_Undef;
-            if (phase_saving > 1 || (phase_saving == 1) && c > trail_lim.last())
+            if (phase_saving > 1 || (phase_saving == 1 && c > trail_lim.last()))
                 polarity[x] = sign(trail[c]);
             insertVarOrder(x); }
         qhead = trail_lim[level];
@@ -435,10 +455,10 @@ bool Solver::litRedundant(Lit p)
 |    Calculates the (possibly empty) set of assumptions that led to the assignment of 'p', and
 |    stores the result in 'out_conflict'.
 |________________________________________________________________________________________________@*/
-void Solver::analyzeFinal(Lit p, vec<Lit>& out_conflict)
+void Solver::analyzeFinal(Lit p, LSet& out_conflict)
 {
     out_conflict.clear();
-    out_conflict.push(p);
+    out_conflict.insert(p);
 
     if (decisionLevel() == 0)
         return;
@@ -450,7 +470,7 @@ void Solver::analyzeFinal(Lit p, vec<Lit>& out_conflict)
         if (seen[x]){
             if (reason(x) == CRef_Undef){
                 assert(level(x) > 0);
-                out_conflict.push(~trail[i]);
+                out_conflict.insert(~trail[i]);
             }else{
                 Clause& c = ca[reason(x)];
                 for (int j = 1; j < c.size(); j++)
@@ -587,8 +607,16 @@ void Solver::removeSatisfied(vec<CRef>& cs)
         Clause& c = ca[cs[i]];
         if (satisfied(c))
             removeClause(cs[i]);
-        else
+        else{
+            // Trim clause:
+            assert(value(c[0]) == l_Undef && value(c[1]) == l_Undef);
+            for (int k = 2; k < c.size(); k++)
+                if (value(c[k]) == l_False){
+                    c[k--] = c[c.size()-1];
+                    c.pop();
+                }
             cs[j++] = cs[i];
+        }
     }
     cs.shrink(i - j);
 }
@@ -624,8 +652,32 @@ bool Solver::simplify()
 
     // Remove satisfied clauses:
     removeSatisfied(learnts);
-    if (remove_satisfied)        // Can be turned off.
+    if (remove_satisfied){       // Can be turned off.
         removeSatisfied(clauses);
+
+        // TODO: what todo in if 'remove_satisfied' is false?
+
+        // Remove all released variables from the trail:
+        for (int i = 0; i < released_vars.size(); i++){
+            assert(seen[released_vars[i]] == 0);
+            seen[released_vars[i]] = 1;
+        }
+
+        int i, j;
+        for (i = j = 0; i < trail.size(); i++)
+            if (seen[var(trail[i])] == 0)
+                trail[j++] = trail[i];
+        trail.shrink(i - j);
+        //printf("trail.size()= %d, qhead = %d\n", trail.size(), qhead);
+        qhead = trail.size();
+
+        for (int i = 0; i < released_vars.size(); i++)
+            seen[released_vars[i]] = 0;
+
+        // Released variables are now ready to be reused:
+        append(released_vars, free_vars);
+        released_vars.clear();
+    }
     checkGarbage();
     rebuildOrderHeap();
 
@@ -695,7 +747,7 @@ lbool Solver::search(int nof_conflicts)
 
         }else{
             // NO CONFLICT
-            if (nof_conflicts >= 0 && conflictC >= nof_conflicts || !withinBudget()){
+            if ((nof_conflicts >= 0 && conflictC >= nof_conflicts) || !withinBudget()){
                 // Reached bound on number of conflicts:
                 progress_estimate = progressEstimate();
                 cancelUntil(0);
@@ -794,7 +846,10 @@ lbool Solver::solve_()
 
     solves++;
 
-    max_learnts               = nClauses() * learntsize_factor;
+    max_learnts = nClauses() * learntsize_factor;
+    if (max_learnts < min_learnts_lim)
+        max_learnts = min_learnts_lim;
+
     learntsize_adjust_confl   = learntsize_adjust_start_confl;
     learntsize_adjust_cnt     = (int)learntsize_adjust_confl;
     lbool   status            = l_Undef;
