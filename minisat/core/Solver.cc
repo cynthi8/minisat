@@ -46,6 +46,8 @@ static DoubleOption  opt_restart_inc       (_cat, "rinc",        "Restart interv
 static DoubleOption  opt_garbage_frac      (_cat, "gc-frac",     "The fraction of wasted memory allowed before a garbage collection is triggered",  0.20, DoubleRange(0, false, HUGE_VAL, false));
 static IntOption     opt_min_learnts_lim   (_cat, "min-learnts", "Minimum learnt clause limit",  0, IntRange(0, INT32_MAX));
 
+static IntOption     opt_fix_ordering        (_cat, "fix-ordering", "The first <fix-ordering> variables are considered as decision variables before any others", 0, IntRange(0, INT32_MAX));
+static BoolOption    opt_fix_ordering_static (_cat, "fix-ordering-static", "Decisions between the first <fix-ordering> variables are static - always in variable numerical order", false);
 
 //=================================================================================================
 // Constructor/Destructor:
@@ -69,7 +71,9 @@ Solver::Solver() :
   , min_learnts_lim  (opt_min_learnts_lim)
   , restart_first    (opt_restart_first)
   , restart_inc      (opt_restart_inc)
-
+  
+  , fix_ordering     (opt_fix_ordering)
+  , fix_ordering_static(opt_fix_ordering_static)
     // Parameters (the rest):
     //
   , learntsize_factor((double)1/(double)3), learntsize_inc(1.1)
@@ -130,7 +134,7 @@ Var Solver::newVar(lbool upol, bool dvar)
     assigns  .insert(v, l_Undef);
     vardata  .insert(v, mkVarData(CRef_Undef, 0));
     activity .reserve(v);
-    activity[v].fixed   = 0;
+    activity[v].fixed   = INT_MAX;
     activity[v].dynamic = rnd_init_act ? drand(random_seed) * 0.00001 : 0;
     seen     .insert(v, 0);
     polarity .insert(v, true);
@@ -859,6 +863,19 @@ lbool Solver::solve_()
         printf("| Conflicts |          ORIGINAL         |          LEARNT          | Progress |\n");
         printf("|           |    Vars  Clauses Literals |    Limit  Clauses Lit/Cl |          |\n");
         printf("===============================================================================\n");
+    }
+
+    if(fix_ordering > 0) {
+        printf("Fixing the variable ordering (%s) for the first %i variables\n", fix_ordering_static ? "statically" : "dynamically", fix_ordering);
+        for (int v = 0; v < fix_ordering; ++v) {
+            if(v >= nVars()) break;
+            if(fix_ordering_static) {
+                setVarOrdering(v, v); // static decisions used between fixed ordered variables (in variable order)
+            }
+            else {
+                setVarOrdering(v, 0); // dynamic decisions used between fixed ordered variables
+            }
+        }
     }
 
     // Search:
